@@ -77,6 +77,7 @@ type dialOptions struct {
 	defaultServiceConfig        *ServiceConfig // defaultServiceConfig is parsed from defaultServiceConfigRawJSON.
 	defaultServiceConfigRawJSON *string
 	resolvers                   []resolver.Builder
+	resolveTimeout              time.Duration
 	idleTimeout                 time.Duration
 	recvBufferPool              SharedBufferPool
 }
@@ -691,6 +692,13 @@ func WithResolvers(rs ...resolver.Builder) DialOption {
 func WithIdleTimeout(d time.Duration) DialOption {
 	return newFuncDialOption(func(o *dialOptions) {
 		o.idleTimeout = d
+	})
+}
+
+// WithResolveTimeout returns a DialOption that configures a DNS resolving timeout.
+func WithResolveTimeout(d time.Duration) DialOption {
+	return newFuncDialOption(func(o *dialOptions) {
+		o.resolveTimeout = d
 	})
 }
 

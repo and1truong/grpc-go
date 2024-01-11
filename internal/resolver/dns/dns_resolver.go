@@ -100,7 +100,9 @@ type dnsBuilder struct{}
 
 // Build creates and starts a DNS resolver that watches the name resolution of
 // the target.
-func (b *dnsBuilder) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (resolver.Resolver, error) {
+func (b *dnsBuilder) Build(target resolver.Target, cc resolver.ClientConn, opts resolver.BuildOptions) (
+	resolver.Resolver, error,
+) {
 	host, port, err := parseTarget(target.Endpoint(), defaultPort)
 	if err != nil {
 		return nil, err
@@ -118,11 +120,16 @@ func (b *dnsBuilder) Build(target resolver.Target, cc resolver.ClientConn, opts 
 	d := &dnsResolver{
 		host:                 host,
 		port:                 port,
+		timeout:              opts.Timeout,
 		ctx:                  ctx,
 		cancel:               cancel,
 		cc:                   cc,
 		rn:                   make(chan struct{}, 1),
 		disableServiceConfig: opts.DisableServiceConfig,
+	}
+
+	if d.timeout == 0 {
+		d.timeout = 1 * time.Minute
 	}
 
 	d.resolver, err = internal.NewNetResolver(target.URL.Host)
@@ -152,6 +159,7 @@ type dnsResolver struct {
 	host     string
 	port     string
 	resolver internal.NetResolver
+	timeout  time.Duration
 	ctx      context.Context
 	cancel   context.CancelFunc
 	cc       resolver.ClientConn
@@ -221,18 +229,18 @@ func (d *dnsResolver) watcher() {
 	}
 }
 
-func (d *dnsResolver) lookupSRV() ([]resolver.Address, error) {
+func (d *dnsResolver) lookupSRV(ctx context.Context) ([]resolver.Address, error) {
 	if !EnableSRVLookups {
 		return nil, nil
 	}
 	var newAddrs []resolver.Address
-	_, srvs, err := d.resolver.LookupSRV(d.ctx, "grpclb", "tcp", d.host)
+	_, srvs, err := d.resolver.LookupSRV(ctx, "grpclb", "tcp", d.host)
 	if err != nil {
 		err = handleDNSError(err, "SRV") // may become nil
 		return nil, err
 	}
 	for _, s := range srvs {
-		lbAddrs, err := d.resolver.LookupHost(d.ctx, s.Target)
+		lbAddrs, err := d.resolver.LookupHost(ctx, s.Target)
 		if err != nil {
 			err = handleDNSError(err, "A") // may become nil
 			if err == nil {
@@ -269,8 +277,8 @@ func handleDNSError(err error, lookupType string) error {
 	return err
 }
 
-func (d *dnsResolver) lookupTXT() *serviceconfig.ParseResult {
-	ss, err := d.resolver.LookupTXT(d.ctx, txtPrefix+d.host)
+func (d *dnsResolver) lookupTXT(ctx context.Context) *serviceconfig.ParseResult {
+	ss, err := d.resolver.LookupTXT(ctx, txtPrefix+d.host)
 	if err != nil {
 		if envconfig.TXTErrIgnore {
 			return nil
@@ -297,8 +305,8 @@ func (d *dnsResolver) lookupTXT() *serviceconfig.ParseResult {
 	return d.cc.ParseServiceConfig(sc)
 }
 
-func (d *dnsResolver) lookupHost() ([]resolver.Address, error) {
-	addrs, err := d.resolver.LookupHost(d.ctx, d.host)
+func (d *dnsResolver) lookupHost(ctx context.Context) ([]resolver.Address, error) {
+	addrs, err := d.resolver.LookupHost(ctx, d.host)
 	if err != nil {
 		err = handleDNSError(err, "A")
 		return nil, err
@@ -316,8 +324,12 @@ func (d *dnsResolver) lookupHost() ([]resolver.Address, error) {
 }
 
 func (d *dnsResolver) lookup() (*resolver.State, error) {
-	srv, srvErr := d.lookupSRV()
-	addrs, hostErr := d.lookupHost()
+	ctxSRV, cancelSRV := context.WithTimeout(d.ctx, d.timeout)
+	defer cancelSRV()
+	srv, srvErr := d.lookupSRV(ctxSRV)
+	ctxHost, cancelHost := context.WithTimeout(d.ctx, d.timeout)
+	defer cancelHost()
+	addrs, hostErr := d.lookupHost(ctxHost)
 	if hostErr != nil && (srvErr != nil || len(srv) == 0) {
 		return nil, hostErr
 	}
@@ -327,7 +339,9 @@ func (d *dnsResolver) lookup() (*resolver.State, error) {
 		state = grpclbstate.Set(state, &grpclbstate.State{BalancerAddresses: srv})
 	}
 	if !d.disableServiceConfig {
-		state.ServiceConfig = d.lookupTXT()
+		ctxTXT, cancelTXT := context.WithTimeout(d.ctx, d.timeout)
+		defer cancelTXT()
+		state.ServiceConfig = d.lookupTXT(ctxTXT)
 	}
 	return &state, nil
 }

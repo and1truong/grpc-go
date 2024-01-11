@@ -135,13 +135,37 @@ func buildResolverWithTestClientConn(t *testing.T, target string) (resolver.Reso
 	}
 
 	tcc := &testutils.ResolverClientConn{Logger: t, UpdateStateF: updateStateF, ReportErrorF: reportErrorF}
-	r, err := b.Build(resolver.Target{URL: *testutils.MustParseURL(fmt.Sprintf("dns:///%s", target))}, tcc, resolver.BuildOptions{})
+	rOpts := resolver.BuildOptions{Timeout: 100 * time.Millisecond}
+	r, err := b.Build(resolver.Target{URL: *testutils.MustParseURL(fmt.Sprintf("dns:///%s", target))}, tcc, rOpts)
 	if err != nil {
 		t.Fatalf("Failed to build DNS resolver for target %q: %v\n", target, err)
 	}
 	t.Cleanup(func() { r.Close() })
 
 	return r, stateCh, errCh
+}
+
+// Test verifies that when the DNS resolver gets timeout error when net.Resolver
+// takes too long to resolve a target.
+func (s) TestResolveTimeout(t *testing.T) {
+	const target = "timeoutaddress"
+	tr := &testNetResolver{}
+	tr.UpdateHostLookupTable(map[string][]string{target: {"1.2.3.4"}})
+	overrideNetResolver(t, tr)
+
+	r, _, errCh := buildResolverWithTestClientConn(t, target)
+	r.ResolveNow(resolver.ResolveNowOptions{})
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("Timeout when waiting for an error from the resolver")
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf(`we expect to see timed out error`)
+		}
+	}
 }
 
 // Waits for a state update from the DNS resolver and verifies the following:
@@ -401,7 +425,9 @@ func (s) TestDNSResolver_Basic(t *testing.T) {
 			txtLookupTable: map[string][]string{
 				"_grpc_config.foo.bar.com": txtRecordServiceConfig(txtRecordGood),
 			},
-			wantAddrs:         []resolver.Address{{Addr: "1.2.3.4" + colonDefaultPort}, {Addr: "5.6.7.8" + colonDefaultPort}},
+			wantAddrs: []resolver.Address{
+				{Addr: "1.2.3.4" + colonDefaultPort}, {Addr: "5.6.7.8" + colonDefaultPort},
+			},
 			wantBalancerAddrs: nil,
 			wantSC:            scJSON,
 		},
@@ -468,16 +494,23 @@ func (s) TestDNSResolver_Basic(t *testing.T) {
 			txtLookupTable: map[string][]string{
 				"_grpc_config.srv.ipv6.single.fake": txtRecordServiceConfig(txtRecordNonMatching),
 			},
-			wantAddrs:         nil,
-			wantBalancerAddrs: []resolver.Address{{Addr: "[2607:f8b0:400a:801::1001]:1234", ServerName: "ipv6.single.fake"}},
-			wantSC:            "{}",
+			wantAddrs: nil,
+			wantBalancerAddrs: []resolver.Address{
+				{
+					Addr: "[2607:f8b0:400a:801::1001]:1234", ServerName: "ipv6.single.fake",
+				},
+			},
+			wantSC: "{}",
 		},
 		{
 			name:   "ipv6_with_SRV_and_multiple_grpclb_address",
 			target: "srv.ipv6.multi.fake",
 			hostLookupTable: map[string][]string{
 				"srv.ipv6.multi.fake": nil,
-				"ipv6.multi.fake":     {"2607:f8b0:400a:801::1001", "2607:f8b0:400a:801::1002", "2607:f8b0:400a:801::1003"},
+				"ipv6.multi.fake": {
+					"2607:f8b0:400a:801::1001", "2607:f8b0:400a:801::1002",
+					"2607:f8b0:400a:801::1003",
+				},
 			},
 			srvLookupTable: map[string][]*net.SRV{
 				"_grpclb._tcp.srv.ipv6.multi.fake": {&net.SRV{Target: "ipv6.multi.fake", Port: 1234}},
@@ -880,8 +913,10 @@ func (s) TestDisableServiceConfig(t *testing.T) {
 				"_grpc_config.foo.bar.com": txtRecordServiceConfig(txtRecordGood),
 			},
 			disableServiceConfig: false,
-			wantAddrs:            []resolver.Address{{Addr: "1.2.3.4" + colonDefaultPort}, {Addr: "5.6.7.8" + colonDefaultPort}},
-			wantSC:               scJSON,
+			wantAddrs: []resolver.Address{
+				{Addr: "1.2.3.4" + colonDefaultPort}, {Addr: "5.6.7.8" + colonDefaultPort},
+			},
+			wantSC: scJSON,
 		},
 		{
 			name:            "true",
@@ -891,8 +926,10 @@ func (s) TestDisableServiceConfig(t *testing.T) {
 				"_grpc_config.foo.bar.com": txtRecordServiceConfig(txtRecordGood),
 			},
 			disableServiceConfig: true,
-			wantAddrs:            []resolver.Address{{Addr: "1.2.3.4" + colonDefaultPort}, {Addr: "5.6.7.8" + colonDefaultPort}},
-			wantSC:               "{}",
+			wantAddrs: []resolver.Address{
+				{Addr: "1.2.3.4" + colonDefaultPort}, {Addr: "5.6.7.8" + colonDefaultPort},
+			},
+			wantSC: "{}",
 		},
 	}
 
@@ -1043,7 +1080,9 @@ func (s) TestCustomAuthority(t *testing.T) {
 			// Override the address dialer to verify the authority being passed.
 			origAddressDialer := dnsinternal.AddressDialer
 			errChan := make(chan error, 1)
-			dnsinternal.AddressDialer = func(authority string) func(ctx context.Context, network, address string) (net.Conn, error) {
+			dnsinternal.AddressDialer = func(authority string) func(ctx context.Context, network, address string) (
+				net.Conn, error,
+			) {
 				if authority != test.wantAuthority {
 					errChan <- fmt.Errorf("wrong custom authority passed to resolver. target: %s got authority: %s want authority: %s", test.authority, authority, test.wantAuthority)
 				} else {

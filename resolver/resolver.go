@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/attributes"
 	"google.golang.org/grpc/credentials"
@@ -168,6 +169,9 @@ type BuildOptions struct {
 	// field. In most cases though, it is not appropriate, and this field may
 	// be ignored.
 	Dialer func(context.Context, string) (net.Conn, error)
+	// Timeout specifies time limit for DNS resolver to resolve a target,
+	// which can be SRV , Host, TXT records.
+	Timeout time.Duration
 }
 
 // An Endpoint is one network endpoint, or server, which may have multiple

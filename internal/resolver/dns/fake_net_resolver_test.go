@@ -20,7 +20,9 @@ package dns_test
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc/internal/testutils"
@@ -46,6 +48,10 @@ func (tr *testNetResolver) LookupHost(ctx context.Context, host string) ([]strin
 
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
+
+	if strings.Contains(host, "timeoutaddress") {
+		return nil, fmt.Errorf("timed out")
+	}
 
 	if addrs, ok := tr.hostLookupTable[host]; ok {
 		return addrs, nil
